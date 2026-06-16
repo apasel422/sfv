@@ -4,16 +4,16 @@ use crate::{
     error, utils,
     visitor::{
         DictionaryVisitor, EntryVisitor, InnerListVisitor, ItemVisitor, ListVisitor,
-        ParameterVisitor,
+        MakeDictionaryVisitor, MakeItemVisitor, MakeListVisitor, ParameterVisitor,
     },
     BareItemFromInput, Date, Decimal, Integer, KeyRef, Num, SFVResult, String, StringRef, TokenRef,
     Version,
 };
 
-fn parse_item<'de>(
-    parser: &mut Parser<'de>,
-    visitor: impl ItemVisitor<'de>,
-) -> Result<(), error::Repr> {
+fn parse_item<'de, V>(parser: &mut Parser<'de>, visitor: V) -> Result<V::Out, error::Repr>
+where
+    V: ItemVisitor<'de>,
+{
     // https://httpwg.org/specs/rfc9651.html#parse-item
     let param_visitor = visitor.bare_item(parser.parse_bare_item()?)?;
     parser.parse_parameters(param_visitor)
@@ -87,6 +87,18 @@ impl<'de> Parser<'de> {
         T::parse(self)
     }
 
+    /// Parses input into a structured field value of `Dictionary` type,
+    /// returning the result as type `T`.
+    ///
+    /// # Errors
+    /// When the parsing process is unsuccessful, including any error raised by a visitor.
+    pub fn parse_dictionary<T>(self) -> SFVResult<T>
+    where
+        T: MakeDictionaryVisitor<'de>,
+    {
+        self.parse_dictionary_with_visitor(T::make_dictionary_visitor())
+    }
+
     /// Parses input into a structured field value of `Dictionary` type, using
     /// the given visitor.
     #[cfg_attr(
@@ -115,12 +127,12 @@ assert_eq!(
     ///
     /// # Errors
     /// When the parsing process is unsuccessful, including any error raised by a visitor.
-    pub fn parse_dictionary_with_visitor(
-        self,
-        visitor: &mut (impl ?Sized + DictionaryVisitor<'de>),
-    ) -> SFVResult<()> {
+    pub fn parse_dictionary_with_visitor<V>(self, mut visitor: V) -> SFVResult<V::Out>
+    where
+        V: DictionaryVisitor<'de>,
+    {
         // https://httpwg.org/specs/rfc9651.html#parse-dictionary
-        self.parse_internal(move |parser| {
+        self.parse_internal(|parser| {
             parse_comma_separated(parser, |parser| {
                 // Note: It is up to the visitor to properly handle duplicate keys.
                 let entry_visitor = visitor.entry(parser.parse_key()?)?;
@@ -129,11 +141,28 @@ assert_eq!(
                     parser.next();
                     parser.parse_list_entry(entry_visitor)
                 } else {
-                    let param_visitor = entry_visitor.bare_item(BareItemFromInput::from(true))?;
-                    parser.parse_parameters(param_visitor)
+                    let param_visitor = entry_visitor
+                        .item()?
+                        .bare_item(BareItemFromInput::from(true))?;
+                    parser.parse_parameters(param_visitor)?;
+                    Ok(())
                 }
-            })
+            })?;
+
+            Ok(visitor.finish()?)
         })
+    }
+
+    /// Parses input into a structured field value of `List` type, returning the
+    /// result as type `T`.
+    ///
+    /// # Errors
+    /// When the parsing process is unsuccessful, including any error raised by a visitor.
+    pub fn parse_list<T>(self) -> SFVResult<T>
+    where
+        T: MakeListVisitor<'de>,
+    {
+        self.parse_list_with_visitor(T::make_list_visitor())
     }
 
     /// Parses input into a structured field value of `List` type, using the
@@ -164,14 +193,27 @@ assert_eq!(
     ///
     /// # Errors
     /// When the parsing process is unsuccessful, including any error raised by a visitor.
-    pub fn parse_list_with_visitor(
-        self,
-        visitor: &mut (impl ?Sized + ListVisitor<'de>),
-    ) -> SFVResult<()> {
+    pub fn parse_list_with_visitor<V>(self, mut visitor: V) -> SFVResult<V::Out>
+    where
+        V: ListVisitor<'de>,
+    {
         // https://httpwg.org/specs/rfc9651.html#parse-list
         self.parse_internal(|parser| {
-            parse_comma_separated(parser, |parser| parser.parse_list_entry(visitor.entry()?))
+            parse_comma_separated(parser, |parser| parser.parse_list_entry(visitor.entry()?))?;
+            Ok(visitor.finish()?)
         })
+    }
+
+    /// Parses input into a structured field value of `Item` type, returning the
+    /// result as type `T`.
+    ///
+    /// # Errors
+    /// When the parsing process is unsuccessful, including any error raised by a visitor.
+    pub fn parse_item<T>(self) -> SFVResult<T>
+    where
+        T: MakeItemVisitor<'de>,
+    {
+        self.parse_item_with_visitor(T::make_item_visitor())
     }
 
     /// Parses input into a structured field value of `Item` type, using the
@@ -179,7 +221,10 @@ assert_eq!(
     ///
     /// # Errors
     /// When the parsing process is unsuccessful, including any error raised by a visitor.
-    pub fn parse_item_with_visitor(self, visitor: impl ItemVisitor<'de>) -> SFVResult<()> {
+    pub fn parse_item_with_visitor<V>(self, visitor: V) -> SFVResult<V::Out>
+    where
+        V: ItemVisitor<'de>,
+    {
         self.parse_internal(|parser| parse_item(parser, visitor))
     }
 
@@ -193,15 +238,15 @@ assert_eq!(
 
     // Generic parse method for checking input before parsing
     // and handling trailing text error
-    fn parse_internal(
+    fn parse_internal<T>(
         mut self,
-        f: impl FnOnce(&mut Self) -> Result<(), error::Repr>,
-    ) -> SFVResult<()> {
+        f: impl FnOnce(&mut Self) -> Result<T, error::Repr>,
+    ) -> SFVResult<T> {
         // https://httpwg.org/specs/rfc9651.html#text-parse
 
         self.consume_sp_chars();
 
-        f(&mut self)?;
+        let value = f(&mut self)?;
 
         self.consume_sp_chars();
 
@@ -209,16 +254,18 @@ assert_eq!(
             return Err(error::Repr::TrailingCharactersAfterParsedValue(self.index).into());
         }
 
-        Ok(())
+        Ok(value)
     }
 
     fn parse_list_entry(&mut self, visitor: impl EntryVisitor<'de>) -> Result<(), error::Repr> {
         // https://httpwg.org/specs/rfc9651.html#parse-item-or-list
         // ListEntry represents a tuple (item_or_inner_list, parameters)
 
-        match self.peek() {
-            Some(b'(') => self.parse_inner_list(visitor.inner_list()?),
-            _ => parse_item(self, visitor),
+        if let Some(b'(') = self.peek() {
+            self.parse_inner_list(visitor.inner_list()?)
+        } else {
+            parse_item(self, visitor.item()?)?;
+            Ok(())
         }
     }
 
@@ -240,7 +287,8 @@ assert_eq!(
             if Some(b')') == self.peek() {
                 self.next();
                 let param_visitor = visitor.finish()?;
-                return self.parse_parameters(param_visitor);
+                self.parse_parameters(param_visitor)?;
+                return Ok(());
             }
 
             parse_item(self, visitor.item()?)?;
@@ -611,10 +659,10 @@ assert_eq!(
         Err(error::Repr::UnterminatedDisplayString(self.index))
     }
 
-    pub(crate) fn parse_parameters(
-        &mut self,
-        mut visitor: impl ParameterVisitor<'de>,
-    ) -> Result<(), error::Repr> {
+    pub(crate) fn parse_parameters<V>(&mut self, mut visitor: V) -> Result<V::Out, error::Repr>
+    where
+        V: ParameterVisitor<'de>,
+    {
         // https://httpwg.org/specs/rfc9651.html#parse-param
 
         while let Some(b';') = self.peek() {
@@ -633,8 +681,7 @@ assert_eq!(
             visitor.parameter(param_name, param_value)?;
         }
 
-        visitor.finish()?;
-        Ok(())
+        Ok(visitor.finish()?)
     }
 
     pub(crate) fn parse_key(&mut self) -> Result<&'de KeyRef, error::Repr> {

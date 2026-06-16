@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 use crate::{
     private::Sealed,
     visitor::{
-        DictionaryVisitor, EntryVisitor, InnerListVisitor, ItemVisitor, ListVisitor,
+        self, DictionaryVisitor, EntryVisitor, InnerListVisitor, ItemVisitor, ListVisitor,
         ParameterVisitor,
     },
     BareItem, BareItemFromInput, Error, Key, KeyRef, Parser,
@@ -150,6 +150,7 @@ impl InnerList {
 }
 
 impl<'de> ParameterVisitor<'de> for &mut Parameters {
+    type Out = ();
     type Error = Infallible;
 
     fn parameter(
@@ -160,26 +161,50 @@ impl<'de> ParameterVisitor<'de> for &mut Parameters {
         self.insert(key.to_owned(), value.into());
         Ok(())
     }
+
+    fn finish(self) -> Result<Self::Out, Self::Error> {
+        Ok(())
+    }
+}
+
+impl<'de> ParameterVisitor<'de> for Parameters {
+    type Out = Self;
+    type Error = Infallible;
+
+    fn parameter(
+        &mut self,
+        key: &'de KeyRef,
+        value: BareItemFromInput<'de>,
+    ) -> Result<(), Self::Error> {
+        self.insert(key.to_owned(), value.into());
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Self::Out, Self::Error> {
+        Ok(self)
+    }
 }
 
 impl<'de> ItemVisitor<'de> for &mut Item {
+    type Out = ();
     type Error = Infallible;
 
     fn bare_item(
         self,
         bare_item: BareItemFromInput<'de>,
-    ) -> Result<impl ParameterVisitor<'de>, Self::Error> {
+    ) -> Result<impl ParameterVisitor<'de, Out = Self::Out>, Self::Error> {
         self.bare_item = bare_item.into();
         Ok(&mut self.params)
     }
 }
 
 impl<'de> ItemVisitor<'de> for &mut InnerList {
+    type Out = ();
     type Error = Infallible;
     fn bare_item(
         self,
         bare_item: BareItemFromInput<'de>,
-    ) -> Result<impl ParameterVisitor<'de>, Self::Error> {
+    ) -> Result<impl ParameterVisitor<'de, Out = Self::Out>, Self::Error> {
         self.items.push(Item::new(bare_item));
         match self.items.last_mut() {
             Some(item) => Ok(&mut item.params),
@@ -200,11 +225,29 @@ impl<'de> InnerListVisitor<'de> for &mut InnerList {
     }
 }
 
-impl<'de> DictionaryVisitor<'de> for Dictionary {
+impl<'de> DictionaryVisitor<'de> for &mut Dictionary {
+    type Out = ();
     type Error = Infallible;
 
     fn entry(&mut self, key: &'de KeyRef) -> Result<impl EntryVisitor<'de>, Self::Error> {
         Ok(Entry { dict: self, key })
+    }
+
+    fn finish(self) -> Result<Self::Out, Self::Error> {
+        Ok(())
+    }
+}
+
+impl<'de> DictionaryVisitor<'de> for Dictionary {
+    type Out = Self;
+    type Error = Infallible;
+
+    fn entry(&mut self, key: &'de KeyRef) -> Result<impl EntryVisitor<'de>, Self::Error> {
+        Ok(Entry { dict: self, key })
+    }
+
+    fn finish(self) -> Result<Self::Out, Self::Error> {
+        Ok(self)
     }
 }
 
@@ -214,12 +257,13 @@ struct Entry<'de, 'a> {
 }
 
 impl<'de> ItemVisitor<'de> for Entry<'de, '_> {
+    type Out = ();
     type Error = Infallible;
 
     fn bare_item(
         self,
         bare_item: BareItemFromInput<'de>,
-    ) -> Result<impl ParameterVisitor<'de>, Self::Error> {
+    ) -> Result<impl ParameterVisitor<'de, Out = Self::Out>, Self::Error> {
         match self
             .dict
             .entry(self.key.to_owned())
@@ -233,6 +277,12 @@ impl<'de> ItemVisitor<'de> for Entry<'de, '_> {
 }
 
 impl<'de> EntryVisitor<'de> for Entry<'de, '_> {
+    type Error = Infallible;
+
+    fn item(self) -> Result<impl ItemVisitor<'de>, Self::Error> {
+        Ok(self)
+    }
+
     fn inner_list(self) -> Result<impl InnerListVisitor<'de>, Self::Error> {
         match self
             .dict
@@ -246,35 +296,64 @@ impl<'de> EntryVisitor<'de> for Entry<'de, '_> {
     }
 }
 
-impl<'de> ItemVisitor<'de> for &mut List {
+// Used to avoid making the `ItemVisitor` and `EntryVisitor` impls for `List`
+// public.
+struct ListWrapper<'a>(&'a mut List);
+
+impl<'de> ItemVisitor<'de> for ListWrapper<'_> {
+    type Out = ();
     type Error = Infallible;
 
     fn bare_item(
         self,
         bare_item: BareItemFromInput<'de>,
-    ) -> Result<impl ParameterVisitor<'de>, Self::Error> {
-        self.push(Item::new(bare_item).into());
-        match self.last_mut() {
+    ) -> Result<impl ParameterVisitor<'de, Out = Self::Out>, Self::Error> {
+        self.0.push(Item::new(bare_item).into());
+        match self.0.last_mut() {
             Some(ListEntry::Item(item)) => Ok(&mut item.params),
             _ => unreachable!(),
         }
     }
 }
 
-impl<'de> EntryVisitor<'de> for &mut List {
+impl<'de> EntryVisitor<'de> for ListWrapper<'_> {
+    type Error = Infallible;
+
+    fn item(self) -> Result<impl ItemVisitor<'de>, Self::Error> {
+        Ok(self)
+    }
+
     fn inner_list(self) -> Result<impl InnerListVisitor<'de>, Self::Error> {
-        self.push(InnerList::default().into());
-        match self.last_mut() {
+        self.0.push(InnerList::default().into());
+        match self.0.last_mut() {
             Some(ListEntry::InnerList(inner_list)) => Ok(inner_list),
             _ => unreachable!(),
         }
     }
 }
 
-impl<'de> ListVisitor<'de> for List {
+impl<'de> ListVisitor<'de> for &mut List {
+    type Out = ();
     type Error = Infallible;
 
     fn entry(&mut self) -> Result<impl EntryVisitor<'de>, Self::Error> {
+        Ok(ListWrapper(self))
+    }
+
+    fn finish(self) -> Result<Self::Out, Self::Error> {
+        Ok(())
+    }
+}
+
+impl<'de> ListVisitor<'de> for List {
+    type Out = Self;
+    type Error = Infallible;
+
+    fn entry(&mut self) -> Result<impl EntryVisitor<'de>, Self::Error> {
+        Ok(ListWrapper(self))
+    }
+
+    fn finish(self) -> Result<Self::Out, Self::Error> {
         Ok(self)
     }
 }
@@ -326,9 +405,7 @@ impl FieldType for Item {
     }
 
     fn parse(parser: Parser<'_>) -> Result<Self, Error> {
-        let mut item = Self::new(false);
-        parser.parse_item_with_visitor(&mut item)?;
-        Ok(item)
+        parser.parse_item()
     }
 }
 
@@ -344,9 +421,7 @@ impl FieldType for List {
     }
 
     fn parse(parser: Parser<'_>) -> Result<Self, Error> {
-        let mut list = Self::new();
-        parser.parse_list_with_visitor(&mut list)?;
-        Ok(list)
+        parser.parse_list()
     }
 }
 
@@ -362,8 +437,17 @@ impl FieldType for Dictionary {
     }
 
     fn parse(parser: Parser<'_>) -> Result<Self, Error> {
-        let mut dict = Self::new();
-        parser.parse_dictionary_with_visitor(&mut dict)?;
-        Ok(dict)
+        parser.parse_dictionary()
+    }
+}
+
+impl<'de> visitor::MakeItemVisitor<'de> for Item {
+    fn make_item_visitor() -> impl ItemVisitor<'de, Out = Self> {
+        |bare_item| {
+            Ok::<_, Infallible>(visitor::parameter_visitor_with(
+                Parameters::new(),
+                |params| Ok(Item::with_params(bare_item, params)),
+            ))
+        }
     }
 }

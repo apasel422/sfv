@@ -167,49 +167,49 @@ fn parse_list_errors() {
     let input = ",";
     assert_eq!(
         Err(error::Repr::ExpectedStartOfBareItem(0).into()),
-        Parser::new(input).parse_list_with_visitor(&mut Ignored)
+        Parser::new(input).parse_list_with_visitor(Ignored)
     );
 
     let input = "a, b c";
     assert_eq!(
         Err(error::Repr::TrailingCharactersAfterMember(5).into()),
-        Parser::new(input).parse_list_with_visitor(&mut Ignored)
+        Parser::new(input).parse_list_with_visitor(Ignored)
     );
 
     let input = "a,";
     assert_eq!(
         Err(error::Repr::TrailingComma(1).into()),
-        Parser::new(input).parse_list_with_visitor(&mut Ignored)
+        Parser::new(input).parse_list_with_visitor(Ignored)
     );
 
     let input = "a     ,    ";
     assert_eq!(
         Err(error::Repr::TrailingComma(6).into()),
-        Parser::new(input).parse_list_with_visitor(&mut Ignored)
+        Parser::new(input).parse_list_with_visitor(Ignored)
     );
 
     let input = "a\t \t ,\t ";
     assert_eq!(
         Err(error::Repr::TrailingComma(5).into()),
-        Parser::new(input).parse_list_with_visitor(&mut Ignored)
+        Parser::new(input).parse_list_with_visitor(Ignored)
     );
 
     let input = "a\t\t,\t\t\t";
     assert_eq!(
         Err(error::Repr::TrailingComma(3).into()),
-        Parser::new(input).parse_list_with_visitor(&mut Ignored)
+        Parser::new(input).parse_list_with_visitor(Ignored)
     );
 
     let input = "(a b),";
     assert_eq!(
         Err(error::Repr::TrailingComma(5).into()),
-        Parser::new(input).parse_list_with_visitor(&mut Ignored)
+        Parser::new(input).parse_list_with_visitor(Ignored)
     );
 
     let input = "(1, 2, (a b)";
     assert_eq!(
         Err(error::Repr::ExpectedInnerListDelimiter(2).into()),
-        Parser::new(input).parse_list_with_visitor(&mut Ignored)
+        Parser::new(input).parse_list_with_visitor(Ignored)
     );
 }
 
@@ -280,12 +280,12 @@ fn parse_dict_errors() {
     let input = "abc=123;a=1;b=2 def";
     assert_eq!(
         Err(error::Repr::TrailingCharactersAfterMember(16).into()),
-        Parser::new(input).parse_dictionary_with_visitor(&mut Ignored)
+        Parser::new(input).parse_dictionary_with_visitor(Ignored)
     );
     let input = "abc=123;a=1,";
     assert_eq!(
         Err(error::Repr::TrailingComma(11).into()),
-        Parser::new(input).parse_dictionary_with_visitor(&mut Ignored)
+        Parser::new(input).parse_dictionary_with_visitor(Ignored)
     );
 }
 
@@ -891,6 +891,7 @@ impl Point {
 
 // For when a `Point` is a parameter somewhere.
 impl<'de> ParameterVisitor<'de> for &mut Point {
+    type Out = ();
     type Error = Infallible;
 
     fn parameter(
@@ -909,9 +910,14 @@ impl<'de> ParameterVisitor<'de> for &mut Point {
         *ptr = i64::from(v);
         Ok(())
     }
+
+    fn finish(self) -> Result<Self::Out, Self::Error> {
+        Ok(())
+    }
 }
 
-impl<'de> DictionaryVisitor<'de> for Point {
+impl<'de> DictionaryVisitor<'de> for &mut Point {
+    type Out = ();
     type Error = Infallible;
 
     fn entry(&mut self, key: &'de KeyRef) -> Result<impl EntryVisitor<'de>, Self::Error> {
@@ -922,6 +928,10 @@ impl<'de> DictionaryVisitor<'de> for Point {
         };
         Ok(Some(CoordVisitor { coord }))
     }
+
+    fn finish(self) -> Result<Self::Out, Self::Error> {
+        Ok(())
+    }
 }
 
 struct CoordVisitor<'a> {
@@ -929,12 +939,13 @@ struct CoordVisitor<'a> {
 }
 
 impl<'de> ItemVisitor<'de> for CoordVisitor<'_> {
+    type Out = ();
     type Error = Infallible;
 
     fn bare_item(
         self,
         bare_item: BareItemFromInput<'de>,
-    ) -> Result<impl ParameterVisitor<'de>, Self::Error> {
+    ) -> Result<impl ParameterVisitor<'de, Out = Self::Out>, Self::Error> {
         if let Some(v) = bare_item.as_integer() {
             *self.coord = i64::from(v);
         }
@@ -943,6 +954,12 @@ impl<'de> ItemVisitor<'de> for CoordVisitor<'_> {
 }
 
 impl<'de> EntryVisitor<'de> for CoordVisitor<'_> {
+    type Error = Infallible;
+
+    fn item(self) -> Result<impl ItemVisitor<'de>, Self::Error> {
+        Ok(self)
+    }
+
     fn inner_list(self) -> Result<impl InnerListVisitor<'de>, Self::Error> {
         Ok(Ignored)
     }
@@ -965,12 +982,13 @@ struct Holder {
 }
 
 impl<'de> ItemVisitor<'de> for &mut Holder {
+    type Out = Option<()>;
     type Error = Infallible;
 
     fn bare_item(
         self,
         bare_item: BareItemFromInput<'de>,
-    ) -> Result<impl ParameterVisitor<'de>, Self::Error> {
+    ) -> Result<impl ParameterVisitor<'de, Out = Self::Out>, Self::Error> {
         Ok(if let Some(v) = bare_item.as_integer() {
             self.v = i64::from(v);
             Some(&mut self.point)
@@ -998,26 +1016,26 @@ fn complex_list_visitor() {
     }
 
     impl<'de> ListVisitor<'de> for Vec<ListHolder> {
+        type Out = Self;
         type Error = Infallible;
 
         fn entry(&mut self) -> Result<impl EntryVisitor<'de>, Self::Error> {
             self.push(ListHolder::default());
             Ok(self.last_mut().unwrap()) // cannot fail
         }
-    }
 
-    impl<'de> ItemVisitor<'de> for &mut ListHolder {
-        type Error = Infallible;
-
-        fn bare_item(
-            self,
-            _bare_item: BareItemFromInput<'de>,
-        ) -> Result<impl ParameterVisitor<'de>, Self::Error> {
-            Ok(Ignored)
+        fn finish(self) -> Result<Self::Out, Self::Error> {
+            Ok(self)
         }
     }
 
     impl<'de> EntryVisitor<'de> for &mut ListHolder {
+        type Error = Infallible;
+
+        fn item(self) -> Result<impl ItemVisitor<'de>, Self::Error> {
+            Ok(Ignored)
+        }
+
         fn inner_list(self) -> Result<impl InnerListVisitor<'de>, Self::Error> {
             Ok(self)
         }
@@ -1036,9 +1054,8 @@ fn complex_list_visitor() {
         }
     }
 
-    let mut list = Vec::<ListHolder>::default();
-    Parser::new("(1;x=4 2;y=5 3);x=1;y=2,(4;x=12;y=33), ()")
-        .parse_list_with_visitor(&mut list)
+    let list: Vec<ListHolder> = Parser::new("(1;x=4 2;y=5 3);x=1;y=2,(4;x=12;y=33), ()")
+        .parse_list()
         .expect("successful parse");
 
     let expected = vec![
@@ -1082,16 +1099,22 @@ fn parse_dictionary_lifetime() -> Result<(), Error> {
     struct Visitor<'de>(Option<&'de KeyRef>);
 
     impl<'de> DictionaryVisitor<'de> for Visitor<'de> {
+        type Out = Option<&'de KeyRef>;
         type Error = Infallible;
 
         fn entry(&mut self, key: &'de KeyRef) -> Result<impl EntryVisitor<'de>, Self::Error> {
             self.0 = Some(key);
             Ok(Ignored)
         }
+
+        fn finish(self) -> Result<Self::Out, Self::Error> {
+            Ok(self.0)
+        }
     }
 
-    let mut visitor = Visitor(None);
-    Parser::new("a=1").parse_dictionary_with_visitor(&mut visitor)?;
-    assert_eq!(visitor.0, Some(key_ref("a")));
+    assert_eq!(
+        Parser::new("a=1").parse_dictionary_with_visitor(Visitor(None))?,
+        Some(key_ref("a"))
+    );
     Ok(())
 }
