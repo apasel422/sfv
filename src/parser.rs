@@ -6,7 +6,7 @@ use crate::{
         DictionaryVisitor, EntryVisitor, InnerListVisitor, ItemVisitor, ListVisitor,
         MakeDictionaryVisitor, MakeItemVisitor, MakeListVisitor, ParameterVisitor,
     },
-    BareItemFromInput, Date, Decimal, Integer, KeyRef, Num, SFVResult, String, StringRef, TokenRef,
+    BareItemFromInput, Date, Decimal, Integer, KeyRef, SFVResult, String, StringRef, TokenRef,
     Version,
 };
 
@@ -28,18 +28,14 @@ fn parse_comma_separated<'de>(
 
         parser.consume_ows_chars();
 
-        if parser.peek().is_none() {
-            return Ok(());
+        match parser.peek() {
+            None => return Ok(()),
+            Some(b',') => {}
+            Some(_) => return Err(error::Repr::TrailingCharactersAfterMember(parser.index)),
         }
 
         let comma_index = parser.index;
-
-        if let Some(c) = parser.peek() {
-            if c != b',' {
-                return Err(error::Repr::TrailingCharactersAfterMember(parser.index));
-            }
-            parser.next();
-        }
+        parser.next();
 
         parser.consume_ows_chars();
 
@@ -51,6 +47,12 @@ fn parse_comma_separated<'de>(
     }
 
     Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum Num {
+    Decimal(Decimal),
+    Integer(Integer),
 }
 
 /// Exposes methods for parsing input into a structured field value.
@@ -315,7 +317,7 @@ assert_eq!(
             Some(c) if utils::is_allowed_start_token_char(c) => {
                 BareItemFromInput::Token(self.parse_token()?)
             }
-            Some(c) if c == b'-' || c.is_ascii_digit() => match self.parse_number()? {
+            Some(b'-' | b'0'..=b'9') => match self.parse_number()? {
                 Num::Decimal(val) => BareItemFromInput::Decimal(val),
                 Num::Integer(val) => BareItemFromInput::Integer(val),
             },
@@ -409,23 +411,19 @@ assert_eq!(
     ) -> Option<&'de str> {
         let start = self.index;
 
-        match self.peek() {
-            Some(c) if is_allowed_start_char(c) => {
-                self.next();
-            }
-            _ => return None,
+        if !self.peek().is_some_and(is_allowed_start_char) {
+            return None;
         }
 
-        loop {
-            match self.peek() {
-                Some(c) if is_allowed_inner_char(c) => {
-                    self.next();
-                }
-                // TODO: The UTF-8 validation is redundant with the preceding character checks, but
-                // its removal is only possible with unsafe code.
-                _ => return Some(std::str::from_utf8(&self.input[start..self.index]).unwrap()),
-            }
+        self.next();
+
+        while self.peek().is_some_and(&is_allowed_inner_char) {
+            self.next();
         }
+
+        // TODO: The UTF-8 validation is redundant with the preceding character checks, but
+        // its removal is only possible with unsafe code.
+        Some(std::str::from_utf8(&self.input[start..self.index]).unwrap())
     }
 
     pub(crate) fn parse_token(&mut self) -> Result<&'de TokenRef, error::Repr> {
@@ -493,12 +491,11 @@ assert_eq!(
             1
         };
 
-        let mut magnitude = match self.peek() {
-            Some(c @ b'0'..=b'9') => {
-                self.next();
-                char_to_i64(c)
-            }
-            _ => return Err(error::Repr::ExpectedDigit(self.index)),
+        let mut magnitude = if let Some(c @ b'0'..=b'9') = self.peek() {
+            self.next();
+            char_to_i64(c)
+        } else {
+            return Err(error::Repr::ExpectedDigit(self.index));
         };
 
         let mut digits = 1;
@@ -670,12 +667,11 @@ assert_eq!(
             self.consume_sp_chars();
 
             let param_name = self.parse_key()?;
-            let param_value = match self.peek() {
-                Some(b'=') => {
-                    self.next();
-                    self.parse_bare_item()?
-                }
-                _ => BareItemFromInput::Boolean(true),
+            let param_value = if let Some(b'=') = self.peek() {
+                self.next();
+                self.parse_bare_item()?
+            } else {
+                BareItemFromInput::Boolean(true)
             };
             // Note: It is up to the visitor to properly handle duplicate keys.
             visitor.parameter(param_name, param_value)?;
