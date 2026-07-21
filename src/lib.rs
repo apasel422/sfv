@@ -162,6 +162,7 @@ mod key;
 mod parsed;
 mod parser;
 mod ref_serializer;
+pub mod serde;
 mod serializer;
 mod string;
 mod token;
